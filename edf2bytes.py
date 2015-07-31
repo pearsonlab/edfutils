@@ -1,22 +1,62 @@
 #!/usr/bin/env python
 # run "ln -s <this-script's-location> /usr/local/bin/edf2bytes" to make this script executable from anywhere
 import argparse
-import urlparse
+from urlparse import urlparse
 import os
 import sys
-from boto import connect_s3, 
+import boto3
+from boto3.s3.transfer import S3Transfer
+import threading
+
+class Progress(object):
+    def __init__(self, filename):
+        self._filename = filename
+        self._size = float(os.path.getsize(filename))
+        self._seen_so_far = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, bytes_amount):
+        with self._lock:
+            self._seen_so_far += bytes_amount
+            relprogress = int((self._seen_so_far / self._size) * 50)
+            sys.stdout.write("\r[" + "=" * relprogress +  " " * (50 - relprogress) + "]" +  str(relprogress*2) + "%")
 
 def local_and_s3_writer(edf, header, local, s3):
-    local_writer(edf, header, local, s3)
-    
-    parsed_s3 = 
-    conn = connect_s3()
+    # write locally
+    localpaths = local_writer(edf, header, local, s3)
 
+    # connect to s3
+    try:
+        transfer = S3Transfer(boto3.client('s3', 'us-east-1'))
+        print "Connected to S3"
+    except:
+        print "Unable to connect to S3!  Make sure AWS credentials are stored as environment variables."
+        return
+
+
+    # connect to specific s3 bucket after checking path validity
+    parsed_s3 = urlparse(s3)
+    if parsed_s3.scheme != 's3':
+        print "Must provide valid S3 URI! (starts with 's3://')"
+        return
+
+    print "Uploading %i files:" % len(localpaths)
+    i = 1
+    for path in localpaths:
+        if parsed_s3.path != '/': # if path beyond bucket is specified
+            fname = os.path.join(parsed_s3.path[1:], path.split('/')[-2], path.split('/')[-1]) # take s3 directory, local folder, and filename
+        else:
+            fname = os.path.join(path.split('/')[-2], path.split('/')[-1]) # take local folder, and filename
+        print "File %i:" % i
+        transfer.upload_file(path, parsed_s3.netloc, fname, callback=Progress(path))
+        sys.stdout.write('\n')
+        i += 1
+    print "Upload complete!"
     return
 
 def local_writer(edf, header, local, s3):
     # create directory for byte files
-    store_path = os.path.join(local,header['filename'],'')
+    store_path = os.path.join(local,header['filename'][:-4],'')
     if not os.path.exists(store_path):
         os.makedirs(store_path)
 
@@ -34,7 +74,7 @@ def local_writer(edf, header, local, s3):
             sigBounds[i] = tuple((sigBounds[i-1][1], sigBounds[i-1][1]+sigBounds[i]*2))
     
     print "Writing data locally..."
-    maxprogress = header['numRecs']*header['numSigs']
+    maxprogress = float((header['numRecs'])*(header['numSigs']))
     # write data from edf to the file
     for i in range(header['numRecs']): # iterate over records
         record = edf.read(sum(header['numSamps'])*2) # read an entire record
@@ -42,16 +82,22 @@ def local_writer(edf, header, local, s3):
             # grab and write signal data from record
             files[j].write(record[sigBounds[j][0]:sigBounds[j][1]])
 
-            # progress bar
-            currprogress = i*header['numRecs']+j
-            relprogress = int((float(currprogress)/maxprogress)*50)
-            sys.stdout.write("\r[" + "=" * relprogress +  " " * (50 - relprogress) + "]" +  str(relprogress*2) + "%")
+        # progress bar
+        currprogress = float((i+1)*header['numSigs'])
+        relprogress = int(50*currprogress/maxprogress)
+        sys.stdout.write("\r[" + "=" * relprogress +  " " * (50 - relprogress) + "]" +  str(relprogress*2) + "%")
     
     for f in files:
         f.close() # close files
 
     print "\nLocal write complete!"
-    return
+
+    # create list for all file paths
+    filepaths = []
+    for i in range(header['numSigs']):
+        filepaths.append(store_path+header['sigLabels'][i]+'.bin')
+
+    return filepaths
 
 def head_parser(thisFile):
     header = {}
@@ -70,13 +116,14 @@ def head_parser(thisFile):
     header['numSamps'] = []
     for i in range(header['numSigs']):
         header['numSamps'].append(int(thisFile.read(8).strip()))
+    return header
 
 if __name__ == '__main__':
     # set up and parse options
     parser = argparse.ArgumentParser()
     parser.add_argument('edfloc', help='Location of edf file to convert')
-    parser.add_argument('local', help='Location to store binary files (One for each signal) on the local machine.')
-    parser.add_argument('--s3', help='URI formatted location to store binary on S3.  Only works if you have AWS ' +
+    parser.add_argument('local', help='Location to store folder of binary files (One for each signal) on the local machine.')
+    parser.add_argument('--s3', help='URI formatted location to store binary folder on S3.  Only works if you have AWS ' +
                                     'credentials stored as environment variables.')
     args = parser.parse_args()
 
@@ -89,7 +136,7 @@ if __name__ == '__main__':
         sys.exit('Must provide an output location (either local (--local), S3 (--s3), or both).')
     elif s3_loc and byte_dir:
         writer = local_and_s3_writer
-    else: # only byte_directory provided
+    else: # only local directory provided
         writer = local_writer
 
     
@@ -100,6 +147,7 @@ if __name__ == '__main__':
 
         # write to binary files
         writer(thisFile, header, byte_dir, s3_loc)
+
 
 
 
