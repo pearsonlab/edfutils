@@ -9,9 +9,6 @@ from boto import connect_s3,
 def local_and_s3_writer(edf, header, local, s3):
     local_writer(edf, header, local, s3)
     
-    return
-
-def s3_writer(edf, header, local, s3):
     parsed_s3 = 
     conn = connect_s3()
 
@@ -78,7 +75,7 @@ if __name__ == '__main__':
     # set up and parse options
     parser = argparse.ArgumentParser()
     parser.add_argument('edfloc', help='Location of edf file to convert')
-    parser.add_argument('--local', help='Location to store binary files (One for each signal) on the local machine.')
+    parser.add_argument('local', help='Location to store binary files (One for each signal) on the local machine.')
     parser.add_argument('--s3', help='URI formatted location to store binary on S3.  Only works if you have AWS ' +
                                     'credentials stored as environment variables.')
     args = parser.parse_args()
@@ -92,8 +89,6 @@ if __name__ == '__main__':
         sys.exit('Must provide an output location (either local (--local), S3 (--s3), or both).')
     elif s3_loc and byte_dir:
         writer = local_and_s3_writer
-    elif s3_loc:
-        writer = s3_writer
     else: # only byte_directory provided
         writer = local_writer
 
