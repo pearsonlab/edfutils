@@ -19,7 +19,8 @@ class Progress(object):
         with self._lock:
             self._seen_so_far += bytes_amount
             relprogress = int((self._seen_so_far / self._size) * 50)
-            sys.stdout.write("\r[" + "=" * relprogress +  " " * (50 - relprogress) + "]" +  str(relprogress*2) + "%")
+            sys.stdout.write("\r[" + "=" * relprogress + " " * (50 - relprogress) + "]" + str(relprogress*2) + "%")
+
 
 def local_and_s3_writer(edf, header, local, s3):
     # write locally
@@ -72,7 +73,7 @@ def local_writer(edf, header, local, s3):
             sigBounds[i] = tuple((0,sigBounds[i]*2))
         else:
             sigBounds[i] = tuple((sigBounds[i-1][1], sigBounds[i-1][1]+sigBounds[i]*2))
-    
+
     print "Writing data locally..."
     maxprogress = float((header['numRecs'])*(header['numSigs']))
     # write data from edf to the file
@@ -86,7 +87,7 @@ def local_writer(edf, header, local, s3):
         currprogress = float((i+1)*header['numSigs'])
         relprogress = int(50*currprogress/maxprogress)
         sys.stdout.write("\r[" + "=" * relprogress +  " " * (50 - relprogress) + "]" +  str(relprogress*2) + "%")
-    
+
     for f in files:
         f.close() # close files
 
@@ -139,7 +140,6 @@ if __name__ == '__main__':
     else: # only local directory provided
         writer = local_writer
 
-    
     # reads an edf file and splits the signals into a folder of binary files (one for each signal)
     with open(edf_file, 'r+b') as thisFile: # open edf file as read-binary
         # parse header
@@ -147,9 +147,3 @@ if __name__ == '__main__':
 
         # write to binary files
         writer(thisFile, header, byte_dir, s3_loc)
-
-
-
-
-
-
