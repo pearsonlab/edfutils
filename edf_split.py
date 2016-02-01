@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# run "ln -s <this-script's-location> /usr/local/bin/edf2bytes" to make this script executable from anywhere
+# run "ln -s <this-script's-location> /usr/local/bin/edf_split" to make this script executable from anywhere
 import argparse
 from urlparse import urlparse
 import os
@@ -7,6 +7,8 @@ import sys
 import boto3
 from boto3.s3.transfer import S3Transfer
 import threading
+import shutil
+import tempfile
 
 class Progress(object):
     def __init__(self, filename):
@@ -61,7 +63,7 @@ def local_writer(edf, header, local, s3):
     if not os.path.exists(store_path):
         os.makedirs(store_path)
 
-    edf.seek(header['length']) # find beginning of data
+    edf.seek(header['head_length']) # find beginning of data
     files = []
     for i in range(header['numSigs']):
         files.append(open(store_path+header['sigLabels'][i]+'.bin', 'wb')) # create file for each signal
@@ -86,7 +88,7 @@ def local_writer(edf, header, local, s3):
         # progress bar
         currprogress = float((i+1)*header['numSigs'])
         relprogress = int(50*currprogress/maxprogress)
-        sys.stdout.write("\r[" + "=" * relprogress +  " " * (50 - relprogress) + "]" +  str(relprogress*2) + "%")
+        sys.stdout.write("\r[" + "=" * relprogress + " " * (50 - relprogress) + "]" +  str(relprogress*2) + "%")
 
     for f in files:
         f.close() # close files
@@ -100,15 +102,23 @@ def local_writer(edf, header, local, s3):
 
     return filepaths
 
+def s3_writer(edf, header, local, s3):
+    try:
+        tmp_dir = tempfile.mkdtemp()
+        local_and_s3_writer(edf, header, tmp_dir, s3)
+    finally:
+        shutil.rmtree(tmp_dir)
+
 def head_parser(thisFile):
     header = {}
     header['filename'] = thisFile.name
     # extract info from header
-    thisFile.read(184)
-    header['length'] = int(thisFile.read(8).strip())
+    thisFile.read(176)
+    header['start_time'] = tuple(int(i) for i in thisFile.read(8).strip().split('.'))  # makes tup of hour, minute, second
+    header['head_length'] = int(thisFile.read(8).strip())
     thisFile.read(44)
     header['numRecs'] = int(thisFile.read(8).strip())
-    thisFile.read(8)
+    header['recDur'] = int(thisFile.read(8).strip())
     header['numSigs'] = int(thisFile.read(4).strip())
     header['sigLabels'] = []
     for i in range(header['numSigs']):
@@ -121,11 +131,16 @@ def head_parser(thisFile):
 
 if __name__ == '__main__':
     # set up and parse options
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='Split edf into files for each channel with proprietary headers. ' +
+                                                  'Must specify location for at least one of --local and --s3 flags ' +
+                                                  'If only s3 loc is specified, files are written to a temporary ' +
+                                                  'directory, which is deleted after the s3 upload is complete.',
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('edfloc', help='Location of edf file to convert')
-    parser.add_argument('local', help='Location to store folder of binary files (One for each signal) on the local machine.')
+    parser.add_argument('--local', help='Location to store folder of binary files (One for each chunk per signal) on the local machine.')
     parser.add_argument('--s3', help='URI formatted location to store binary folder on S3.  Only works if you have AWS ' +
                                     'credentials stored as environment variables.')
+    parser.add_argument('--chunk', help='Chunk size (in minutes) to break recordings by', default=60)
     args = parser.parse_args()
 
     edf_file = args.edfloc
@@ -137,8 +152,10 @@ if __name__ == '__main__':
         sys.exit('Must provide an output location (either local (--local), S3 (--s3), or both).')
     elif s3_loc and byte_dir:
         writer = local_and_s3_writer
-    else: # only local directory provided
-        writer = local_writer
+    elif s3_loc:  # only local directory provided
+        writer = s3_writer
+    else:
+        write = local_writer
 
     # reads an edf file and splits the signals into a folder of binary files (one for each signal)
     with open(edf_file, 'r+b') as thisFile: # open edf file as read-binary
