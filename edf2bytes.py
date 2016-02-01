@@ -57,7 +57,7 @@ def local_and_s3_writer(edf, header, local, s3):
 
 def local_writer(edf, header, local, s3):
     # create directory for byte files
-    store_path = os.path.join(local,header['filename'][:-4],'')
+    store_path = os.path.join(local, header['filename'].split('.')[0], '')
     if not os.path.exists(store_path):
         os.makedirs(store_path)
 
