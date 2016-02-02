@@ -9,6 +9,7 @@ from boto3.s3.transfer import S3Transfer
 import threading
 import shutil
 import tempfile
+import json
 
 class Progress(object):
     def __init__(self, filename):
@@ -63,27 +64,66 @@ def local_writer(edf, header, local, s3):
     if not os.path.exists(store_path):
         os.makedirs(store_path)
 
-    edf.seek(header['head_length']) # find beginning of data
-    files = []
-    for i in range(header['numSigs']):
-        files.append(open(store_path+header['sigLabels'][i]+'.bin', 'wb')) # create file for each signal
+    edf.seek(header['head_length'])  # find beginning of data
 
     # make list that marks the indeces of where to cut a data record buffer per signal
     sigBounds = list(header['numSamps'])
-    for i in range(header['numSigs']): # mark index where each signal starts and ends within each record
-        if i==0:
-            sigBounds[i] = tuple((0,sigBounds[i]*2))
+    for i in range(header['numSigs']):  # mark index where each signal starts and ends within each record
+        if i == 0:
+            sigBounds[i] = tuple((0, sigBounds[i]*2))
         else:
             sigBounds[i] = tuple((sigBounds[i-1][1], sigBounds[i-1][1]+sigBounds[i]*2))
 
     print "Writing data locally..."
     maxprogress = float((header['numRecs'])*(header['numSigs']))
     # write data from edf to the file
-    for i in range(header['numRecs']): # iterate over records
-        record = edf.read(sum(header['numSamps'])*2) # read an entire record
-        for j in range(header['numSigs']): # iterate over signals within records
+    chunk_rec = 0  # number of record within chunk
+    chunk_num = 0  # current chunk number
+    files = []
+    for i in range(header['numRecs']):  # iterate over records
+        if chunk_rec >= header['recsPerChunk']:
+            chunk_rec = 0
+            chunk_num += 1
+        if chunk_rec == 0:  # start new files if new chunk
+            for f in files:
+                f.close()
+            files = []
+            for j in range(header['numSigs']):
+                files.append(open(store_path+header['sigLabels'][j] +
+                                  '_chunk-' + str(chunk_num) +
+                                  '.chn', 'wb'))  # create file for each signal
+                file_head = dict(header)  # copy header info
+                # modify header info for this channel
+                file_head.pop('head_length')
+                file_head.pop('numRecs')
+                file_head.pop('recDur')
+                file_head.pop('numSigs')
+                file_head.pop('sigLabels')
+                file_head.pop('numSamps')
+                file_head['read_instruct'] = ("To load this file properly, " +
+                                              "use json.loads(f.readline()) " +
+                                              "to get the header, then use " +
+                                              "np.fromstring(f.read(),'<i2')" +
+                                              " to get the values." +
+                                              "Note: if chunk is from end of" +
+                                              " file, it may not be the full" +
+                                              " chunk size.")
+                hr, mnt, sec = header['start_time']
+                mnt += header['chunkTime'] * chunk_num
+                hr += (mnt / 60)
+                mnt = mnt % 60
+                file_head['start_time'] = (hr, mnt, sec)
+                file_head['sigLabel'] = header['sigLabels'][j]
+                file_head['sampsPerRecord'] = header['numSamps'][j]
+                file_head['chunk'] = chunk_num
+                files[j].write(json.dumps(file_head))
+                files[j].write('\n')
+
+        record = edf.read(sum(header['numSamps'])*2)  # read an entire record
+        for j in range(header['numSigs']):  # iterate over signals within records
             # grab and write signal data from record
             files[j].write(record[sigBounds[j][0]:sigBounds[j][1]])
+        chunk_rec += 1
 
         # progress bar
         currprogress = float((i+1)*header['numSigs'])
@@ -109,7 +149,7 @@ def s3_writer(edf, header, local, s3):
     finally:
         shutil.rmtree(tmp_dir)
 
-def head_parser(thisFile):
+def head_parser(thisFile, chunk_size):
     header = {}
     header['filename'] = thisFile.name
     # extract info from header
@@ -118,7 +158,7 @@ def head_parser(thisFile):
     header['head_length'] = int(thisFile.read(8).strip())
     thisFile.read(44)
     header['numRecs'] = int(thisFile.read(8).strip())
-    header['recDur'] = int(thisFile.read(8).strip())
+    header['recDur'] = float(thisFile.read(8).strip())
     header['numSigs'] = int(thisFile.read(4).strip())
     header['sigLabels'] = []
     for i in range(header['numSigs']):
@@ -127,6 +167,9 @@ def head_parser(thisFile):
     header['numSamps'] = []
     for i in range(header['numSigs']):
         header['numSamps'].append(int(thisFile.read(8).strip()))
+
+    header['chunkTime'] = chunk_size
+    header['recsPerChunk'] = chunk_size / (header['recDur'] / 60)
     return header
 
 if __name__ == '__main__':
@@ -144,23 +187,24 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     edf_file = args.edfloc
-    byte_dir = args.local
+    local_loc = args.local
     s3_loc = args.s3
+    chunk_size = int(args.chunk)
 
     # set up file writer
-    if not s3_loc and not byte_dir:
+    if not s3_loc and not local_loc:
         sys.exit('Must provide an output location (either local (--local), S3 (--s3), or both).')
-    elif s3_loc and byte_dir:
+    elif s3_loc and local_loc:
         writer = local_and_s3_writer
     elif s3_loc:  # only local directory provided
         writer = s3_writer
     else:
-        write = local_writer
+        writer = local_writer
 
     # reads an edf file and splits the signals into a folder of binary files (one for each signal)
     with open(edf_file, 'r+b') as thisFile: # open edf file as read-binary
         # parse header
-        header = head_parser(thisFile)
+        header = head_parser(thisFile, chunk_size)
 
         # write to binary files
-        writer(thisFile, header, byte_dir, s3_loc)
+        writer(thisFile, header, local_loc, s3_loc)
